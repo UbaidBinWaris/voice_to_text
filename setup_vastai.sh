@@ -29,7 +29,7 @@ if [ ! -f "$PIPER_MODEL" ] || [ $(stat -c%s "$PIPER_MODEL" 2>/dev/null || echo 0
     wget -O "$PIPER_JSON" "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx.json"
 fi
 
-# Set up GPU environment file
+# Copy GPU environment configuration
 echo "⚙️ Configuring environment for Vast.ai GPU..."
 cp -f .env.gpu .env
 
