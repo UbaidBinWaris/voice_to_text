@@ -14,6 +14,7 @@ SAMPLE_RATE = 16000
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2:0.5b"
 PIPER_MODEL = "piper_models/en_US-ryan-high.onnx"
+MAX_RESPONSE_WORDS = 20
 
 print("="*50)
 print("INITIALIZING LOW-LATENCY AI CALLER...")
@@ -34,7 +35,7 @@ tts_voice = PiperVoice.load(PIPER_MODEL)
 vad = webrtcvad.Vad(2) # 0 to 3 aggression
 print("✅ AI Fully Loaded and Ready.\n")
 
-conversation_history = "You are a helpful, conversational AI taking part in a live voice phone call. Keep your answers very brief, friendly, and conversational. Only answer in 1 or 2 sentences max. Do not use emojis or markdown formatting, just plain spoken text.\n\n"
+conversation_history = f"You are Samantha, a friendly receptionist at a highly-rated Italian restaurant called 'Bella Napoli'. You are taking a live phone call from a customer. You can help them book a table, ask about the menu, or answer questions about business hours (open 5 PM to 10 PM daily). Your responses MUST be strictly under {MAX_RESPONSE_WORDS} words. Keep your answers brief, natural, and conversational. Do not use emojis, asterisks, or markdown formatting, just plain spoken text.\n\n"
 
 def ask_ollama_streaming(prompt):
     global conversation_history
