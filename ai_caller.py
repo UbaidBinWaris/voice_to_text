@@ -8,49 +8,55 @@ import json
 import os
 from faster_whisper import WhisperModel
 from piper.voice import PiperVoice
-
-# CONFIGURATION
-SAMPLE_RATE = 16000
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen2:0.5b"
-PIPER_MODEL = "piper_models/en_US-ryan-high.onnx"
-MAX_RESPONSE_WORDS = 20
+from config import config
 
 print("="*50)
 print("INITIALIZING LOW-LATENCY AI CALLER...")
 print("="*50)
+print(f"⚙️  STT Model: {config.WHISPER_MODEL} ({config.WHISPER_DEVICE.upper()}, {config.WHISPER_COMPUTE_TYPE})")
+print(f"⚙️  Ollama URL: {config.OLLAMA_URL}")
+print(f"⚙️  Ollama Model: {config.OLLAMA_MODEL}")
+print("="*50)
 
 # 1. Load STT
 print("Loading Ears (Faster Whisper)...")
-stt_model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+try:
+    stt_model = WhisperModel(config.WHISPER_MODEL, device=config.WHISPER_DEVICE, compute_type=config.WHISPER_COMPUTE_TYPE)
+except Exception as e:
+    print(f"⚠️ Warning: Failed to load on {config.WHISPER_DEVICE} ({e}). Falling back to CPU int8...")
+    stt_model = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
 
 # 2. Load TTS
 print("Loading Mouth (Piper TTS)...")
-if not os.path.exists(PIPER_MODEL):
-    print(f"❌ Error: Could not find {PIPER_MODEL}.")
-    exit(1)
-tts_voice = PiperVoice.load(PIPER_MODEL)
+if not os.path.exists(config.PIPER_MODEL):
+    print(f"❌ Error: Could not find {config.PIPER_MODEL}.")
+    sys.exit(1)
+tts_voice = PiperVoice.load(config.PIPER_MODEL)
 
 # 3. Load VAD
-vad = webrtcvad.Vad(3) # 0 to 3 aggression (3 is most aggressive at filtering noise)
+vad = webrtcvad.Vad(config.VAD_AGGRESSIVENESS)
 
 # 4. Warm up the LLM (Prevents slow cold-starts on the first turn)
 print("Warming up Brain (Loading model into memory)...", end="\r")
 try:
-    requests.post(OLLAMA_URL, json={"model": OLLAMA_MODEL, "prompt": "Hi", "stream": False, "options": {"num_predict": 1}}, timeout=10)
-except:
-    pass
+    requests.post(
+        config.OLLAMA_URL, 
+        json={"model": config.OLLAMA_MODEL, "prompt": "Hi", "stream": False, "options": {"num_predict": 1}}, 
+        timeout=10
+    )
+except Exception as e:
+    print(f"\n⚠️ Note: Could not warm up Ollama ({e}). Ensure Ollama is running.")
 
 print("✅ AI Fully Loaded and Ready.                  \n")
 
-SYSTEM_PROMPT = f"You are Samantha, a friendly receptionist at a highly-rated Italian restaurant called 'Bella Napoli'. You are taking a live phone call from a customer. You can help them book a table, ask about the menu, or answer questions about business hours (open 5 PM to 10 PM daily). Your responses MUST be strictly under {MAX_RESPONSE_WORDS} words. Keep your answers brief, natural, and conversational. Do not use emojis, asterisks, or markdown formatting, just plain spoken text.\n\n"
+SYSTEM_PROMPT = f"You are Samantha, a friendly receptionist at a highly-rated Italian restaurant called 'Bella Napoli'. You are taking a live phone call from a customer. You can help them book a table, ask about the menu, or answer questions about business hours (open 5 PM to 10 PM daily). Your responses MUST be strictly under {config.MAX_RESPONSE_WORDS} words. Keep your answers brief, natural, and conversational. Do not use emojis, asterisks, or markdown formatting, just plain spoken text.\n\n"
 chat_history = []
 
 def ask_ollama_streaming(prompt):
     global chat_history
     chat_history.append(("User", prompt))
     
-    # Keep only the last 4 turns (8 messages) to prevent CPU slowdowns!
+    # Keep only the last 4 turns (8 messages) to prevent context slowdowns
     if len(chat_history) > 8:
         chat_history = chat_history[-8:]
         
@@ -60,16 +66,16 @@ def ask_ollama_streaming(prompt):
     full_prompt += "AI:"
     
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": config.OLLAMA_MODEL,
         "prompt": full_prompt,
         "stream": True
     }
     
     try:
-        response = requests.post(OLLAMA_URL, json=payload, stream=True)
+        response = requests.post(config.OLLAMA_URL, json=payload, stream=True)
         response.raise_for_status()
     except Exception as e:
-        print(f"\nError: I cannot reach Ollama. Is it running? ({e})")
+        print(f"\nError: Cannot reach Ollama at {config.OLLAMA_URL} ({e})")
         return
 
     current_sentence = ""
@@ -110,18 +116,18 @@ def ask_ollama_streaming(prompt):
 
 def record_audio_vad():
     print("\n" + "-"*50)
-    print("Listening... (Speak to start, pause for 0.6s to submit)")
+    print(f"Listening... (Speak to start, pause for {config.SILENCE_DURATION_SEC}s to submit)")
     
     audio_data = []
     chunk_duration_ms = 30 
-    chunk_size = int(SAMPLE_RATE * chunk_duration_ms / 1000) # 480 samples
+    chunk_size = int(config.SAMPLE_RATE * chunk_duration_ms / 1000) # 480 samples
     
-    stream = sd.RawInputStream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=chunk_size)
+    stream = sd.RawInputStream(samplerate=config.SAMPLE_RATE, channels=1, dtype='int16', blocksize=chunk_size)
     stream.start()
     
     silence_frames = 0
-    max_silence_frames = int(1000 / chunk_duration_ms) * 0.6 # 0.6 seconds of silence
-    max_total_frames = int(1000 / chunk_duration_ms) * 15 # 15 seconds hard limit
+    max_silence_frames = int((1000 / chunk_duration_ms) * config.SILENCE_DURATION_SEC)
+    max_total_frames = int((1000 / chunk_duration_ms) * 15) # 15 seconds hard limit
     total_frames = 0
     has_spoken = False
     
@@ -131,7 +137,7 @@ def record_audio_vad():
         
         is_speech = False
         try:
-            is_speech = vad.is_speech(chunk_bytes, SAMPLE_RATE)
+            is_speech = vad.is_speech(chunk_bytes, config.SAMPLE_RATE)
         except:
             pass
             
@@ -171,7 +177,7 @@ print("="*50)
 while True:
     try:
         audio = record_audio_vad()
-        if len(audio) < SAMPLE_RATE * 0.5: # Ignore if too short
+        if len(audio) < config.SAMPLE_RATE * 0.5: # Ignore if too short
             continue
             
         # 1. Ears
