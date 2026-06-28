@@ -4,6 +4,7 @@ import json
 import asyncio
 import io
 import wave
+import tempfile
 import numpy as np
 import requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,13 +13,6 @@ from fastapi.responses import HTMLResponse
 from faster_whisper import WhisperModel
 from piper.voice import PiperVoice
 from config import config
-try:
-    import webrtcvad
-except ImportError:
-    try:
-        import webrtcvad_wheels as webrtcvad
-    except ImportError:
-        import webrtcvad_fast as webrtcvad
 
 app = FastAPI(title="Voice AI Real-Time Web Server")
 
@@ -32,11 +26,10 @@ app.add_middleware(
 
 stt_model = None
 tts_voice = None
-vad = None
 
 @app.on_event("startup")
 def startup_event():
-    global stt_model, tts_voice, vad
+    global stt_model, tts_voice
     print("="*50)
     print("STARTING REAL-TIME VOICE AI SERVER...")
     print("="*50)
@@ -52,7 +45,6 @@ def startup_event():
 
     if os.path.exists(config.PIPER_MODEL):
         tts_voice = PiperVoice.load(config.PIPER_MODEL)
-    vad = webrtcvad.Vad(config.VAD_AGGRESSIVENESS)
 
     try:
         requests.post(
@@ -111,10 +103,9 @@ def get_web_client():
 
         <script>
             window.ws = null;
-            window.audioContext = null;
-            window.processor = null;
+            window.mediaRecorder = null;
             window.micStream = null;
-            window.sourceNode = null;
+            window.audioContext = null;
             let audioQueue = [];
             let isPlaying = false;
 
@@ -181,61 +172,33 @@ def get_web_client():
                 });
             }
 
-            function downsampleBuffer(buffer, sampleRate, outSampleRate) {
-                if (outSampleRate === sampleRate) return buffer;
-                const sampleRateRatio = sampleRate / outSampleRate;
-                const newLength = Math.round(buffer.length / sampleRateRatio);
-                const result = new Float32Array(newLength);
-                let offsetResult = 0;
-                let offsetBuffer = 0;
-                while (offsetResult < result.length) {
-                    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-                    let accum = 0, count = 0;
-                    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-                        accum += buffer[i];
-                        count++;
-                    }
-                    result[offsetResult] = accum / count;
-                    offsetResult++;
-                    offsetBuffer = nextOffsetBuffer;
-                }
-                return result;
-            }
-
             startBtn.onclick = async () => {
                 try {
                     await connectWebSocket();
-                    window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                    if (window.audioContext.state === 'suspended') await window.audioContext.resume();
+                    window.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                     
-                    window.micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-                    window.sourceNode = window.audioContext.createMediaStreamSource(window.micStream);
-                    window.processor = window.audioContext.createScriptProcessor(4096, 1, 1);
+                    let mimeType = 'audio/webm';
+                    if (!MediaRecorder.isTypeSupported('audio/webm')) {
+                        mimeType = 'audio/ogg';
+                    }
 
-                    const nativeSampleRate = window.audioContext.sampleRate;
-
-                    window.processor.onaudioprocess = (e) => {
-                        const inputData = e.inputBuffer.getChannelData(0);
-                        const resampledData = downsampleBuffer(inputData, nativeSampleRate, 16000);
-                        const int16Data = new Int16Array(resampledData.length);
-                        for (let i = 0; i < resampledData.length; i++) {
-                            int16Data[i] = Math.max(-1, Math.min(1, resampledData[i])) * 0x7FFF;
-                        }
-                        if (window.ws && window.ws.readyState === WebSocket.OPEN) {
-                            window.ws.send(int16Data.buffer.slice(int16Data.byteOffset, int16Data.byteOffset + int16Data.byteLength));
+                    window.mediaRecorder = new MediaRecorder(window.micStream, { mimeType: mimeType });
+                    
+                    window.mediaRecorder.ondataavailable = (e) => {
+                        if (e.data.size > 0 && window.ws && window.ws.readyState === WebSocket.OPEN) {
+                            e.data.arrayBuffer().then(buffer => {
+                                window.ws.send(buffer);
+                            });
                         }
                     };
 
-                    window.sourceNode.connect(window.processor);
-                    window.processor.connect(window.audioContext.destination);
+                    window.mediaRecorder.start(250); // Send audio slice every 250ms
                     status.innerText = '🟢 Live Microphone Active - Speak Now!';
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
                 } catch(err) {
                     console.error("Mic error:", err);
-                    status.innerText = '🟢 Text Voice Session Connected';
-                    startBtn.disabled = true;
-                    stopBtn.disabled = false;
+                    alert("Microphone Access Error: " + err.message);
                 }
             };
 
@@ -255,8 +218,8 @@ def get_web_client():
 
             stopBtn.onclick = () => {
                 if (window.ws) window.ws.close();
+                if (window.mediaRecorder && window.mediaRecorder.state !== 'inactive') window.mediaRecorder.stop();
                 if (window.micStream) window.micStream.getTracks().forEach(track => track.stop());
-                if (window.audioContext) window.audioContext.close();
             };
         </script>
     </body>
@@ -270,17 +233,12 @@ SYSTEM_PROMPT = f"You are Samantha, a friendly receptionist at a restaurant call
 async def websocket_call(websocket: WebSocket):
     await websocket.accept()
     print("\n" + "="*50)
-    print("⚡ NEW REAL-TIME VOICE SESSION CONNECTED")
+    print("⚡ NEW REAL-TIME MEDIARECORDER SESSION CONNECTED")
     print("="*50)
     
-    audio_buffer = bytearray()
-    speech_accumulator = bytearray()
+    audio_chunks = bytearray()
     chat_history = []
-    chunk_size = 480 # 30ms at 16kHz
-    silence_frames = 0
-    max_silence_frames = int((1000 / 30) * config.SILENCE_DURATION_SEC)
-    has_spoken = False
-    bytes_received_counter = 0
+    last_process_time = asyncio.get_event_loop().time()
     
     try:
         while True:
@@ -293,47 +251,30 @@ async def websocket_call(websocket: WebSocket):
                 
             if "bytes" in message and message["bytes"]:
                 data = message["bytes"]
-                audio_buffer.extend(data)
-                bytes_received_counter += len(data)
+                audio_chunks.extend(data)
                 
-                if bytes_received_counter % 80000 == 0:
-                    print(f"📥 Received {bytes_received_counter} bytes of audio from mic stream...", end="\r", flush=True)
-                
-                while len(audio_buffer) >= chunk_size:
-                    frame = bytes(audio_buffer[:chunk_size])
-                    audio_buffer = audio_buffer[chunk_size:]
+                now = asyncio.get_event_loop().time()
+                # Accumulate audio and process every 2.0 seconds of recording
+                if now - last_process_time >= 2.0 and len(audio_chunks) > 10000:
+                    raw_bytes = bytes(audio_chunks)
+                    audio_chunks = bytearray()
+                    last_process_time = now
                     
-                    is_speech = False
-                    try:
-                        is_speech = vad.is_speech(frame, 16000)
-                    except:
-                        pass
+                    # Process directly via tempfile for ffmpeg/Faster-Whisper decoding
+                    with tempfile.NamedTemporaryFile(suffix=".webm", delete=True) as tmp:
+                        tmp.write(raw_bytes)
+                        tmp.flush()
                         
-                    if is_speech:
-                        if not has_spoken:
-                            print("\n🎤 Hearing user speaking! Recording speech...", end="\r", flush=True)
-                        has_spoken = True
-                        silence_frames = 0
-                        speech_accumulator.extend(frame)
-                    elif has_spoken:
-                        silence_frames += 1
-                        speech_accumulator.extend(frame)
-                        
-                    if has_spoken and silence_frames > max_silence_frames:
-                        raw_audio = bytes(speech_accumulator)
-                        speech_accumulator = bytearray()
-                        has_spoken = False
-                        silence_frames = 0
-                        
-                        audio_np = np.frombuffer(raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
-                        if len(audio_np) > 4000:
-                            print("\n🛑 Transcribing user speech with Faster-Whisper GPU...")
-                            segments, _ = stt_model.transcribe(audio_np, beam_size=1)
+                        try:
+                            print("\n🛑 Transcribing WebM audio slice with Faster-Whisper GPU...")
+                            segments, _ = stt_model.transcribe(tmp.name, beam_size=1)
                             user_text = " ".join([s.text for s in segments]).strip()
-                            if user_text:
+                            if user_text and len(user_text) > 1:
                                 print(f"🗣️ User: '{user_text}'")
                                 await websocket.send_text(json.dumps({"type": "user", "text": user_text}))
                                 await process_ai_voice(user_text, chat_history, websocket)
+                        except Exception as stt_err:
+                            print(f"⚠️ STT error: {stt_err}")
 
             elif "text" in message and message["text"]:
                 payload = json.loads(message["text"])
