@@ -185,7 +185,9 @@ def get_web_client():
                 try {
                     await connectWebSocket();
                     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-                    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+                    if (audioContext.state === 'suspended') await audioContext.resume();
+                    
+                    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
                     const source = audioContext.createMediaStreamSource(micStream);
                     processor = audioContext.createScriptProcessor(4096, 1, 1);
 
@@ -206,6 +208,7 @@ def get_web_client():
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
                 } catch(err) {
+                    console.error("Mic error:", err);
                     status.innerText = '🟢 Text Voice Session Connected';
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
@@ -253,6 +256,7 @@ async def websocket_call(websocket: WebSocket):
     silence_frames = 0
     max_silence_frames = int((1000 / 30) * config.SILENCE_DURATION_SEC)
     has_spoken = False
+    bytes_received_counter = 0
     
     try:
         while True:
@@ -260,6 +264,10 @@ async def websocket_call(websocket: WebSocket):
             if "bytes" in message and message["bytes"]:
                 data = message["bytes"]
                 audio_buffer.extend(data)
+                bytes_received_counter += len(data)
+                
+                if bytes_received_counter % 160000 == 0:
+                    print(f"📥 Received {bytes_received_counter} bytes of audio from mic stream...", end="\r", flush=True)
                 
                 while len(audio_buffer) >= chunk_size:
                     frame = bytes(audio_buffer[:chunk_size])
@@ -273,7 +281,7 @@ async def websocket_call(websocket: WebSocket):
                         
                     if is_speech:
                         if not has_spoken:
-                            print("🎤 Hearing user audio...", end="\r", flush=True)
+                            print("\n🎤 Hearing user speaking! Recording speech...", end="\r", flush=True)
                         has_spoken = True
                         silence_frames = 0
                         speech_accumulator.extend(frame)
@@ -289,7 +297,7 @@ async def websocket_call(websocket: WebSocket):
                         
                         audio_np = np.frombuffer(raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
                         if len(audio_np) > 4000:
-                            print("\n🛑 Transcribing audio with Faster-Whisper GPU...")
+                            print("\n🛑 Transcribing user speech with Faster-Whisper GPU...")
                             segments, _ = stt_model.transcribe(audio_np, beam_size=1)
                             user_text = " ".join([s.text for s in segments]).strip()
                             if user_text:
