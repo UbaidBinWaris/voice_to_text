@@ -85,12 +85,13 @@ def get_web_client():
             #stopBtn { background: #e53935; color: white; }
             #stopBtn:disabled, #startBtn:disabled { background: #444; color: #888; cursor: not-allowed; }
             #status { margin: 20px 0; font-size: 18px; font-weight: 500; color: #4caf50; }
-            #chat { text-align: left; background: #121212; padding: 20px; border-radius: 12px; height: 300px; overflow-y: auto; font-size: 16px; line-height: 1.5; border: 1px solid #333; margin-bottom: 20px; }
+            #chat { text-align: left; background: #121212; padding: 20px; border-radius: 12px; height: 280px; overflow-y: auto; font-size: 16px; line-height: 1.5; border: 1px solid #333; margin-bottom: 20px; }
             .user-msg { color: #64b5f6; margin-bottom: 12px; }
             .ai-msg { color: #81c784; margin-bottom: 12px; }
             .input-box { display: flex; gap: 10px; }
             .input-box input { flex: 1; padding: 14px; border-radius: 8px; border: 1px solid #444; background: #2a2a2a; color: white; font-size: 16px; }
             .input-box button { margin: 0; padding: 14px 24px; border-radius: 8px; background: #4caf50; }
+            .notice { font-size: 14px; color: #ffca28; margin-top: 15px; }
         </style>
     </head>
     <body>
@@ -104,9 +105,10 @@ def get_web_client():
             <div id="chat"></div>
             
             <div class="input-box">
-                <input type="text" id="textInput" placeholder="Or type your message here to test instant AI voice playback..." />
+                <input type="text" id="textInput" placeholder="Type a prompt to test instant GPU AI voice streaming..." />
                 <button id="sendBtn">Send & Speak</button>
             </div>
+            <div class="notice">💡 Tip: Browsers require HTTPS for mic prompts over external IPs. Use the text box or Chrome SSL flag to test mic streaming live!</div>
         </div>
 
         <script>
@@ -205,8 +207,7 @@ def get_web_client():
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
                 } catch(err) {
-                    alert('Microphone notice: Browsers require HTTPS or chrome flags for microphone permissions over external IPs. You can also use the text box below to test live voice synthesis!');
-                    status.innerText = '🟢 Text Voice Session Active';
+                    status.innerText = '🟢 Text Voice Session Connected';
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
                 }
@@ -242,7 +243,9 @@ SYSTEM_PROMPT = f"You are Samantha, a friendly receptionist at a restaurant call
 @app.websocket("/ws/call")
 async def websocket_call(websocket: WebSocket):
     await websocket.accept()
-    print("⚡ Real-time voice session started.")
+    print("\n" + "="*50)
+    print("⚡ NEW REAL-TIME VOICE SESSION CONNECTED")
+    print("="*50)
     
     audio_buffer = bytearray()
     chat_history = []
@@ -269,6 +272,8 @@ async def websocket_call(websocket: WebSocket):
                         pass
                         
                     if is_speech:
+                        if not has_spoken:
+                            print("🎤 Hearing user audio...", end="\r", flush=True)
                         has_spoken = True
                         silence_frames = 0
                     elif has_spoken:
@@ -282,9 +287,11 @@ async def websocket_call(websocket: WebSocket):
                         
                         audio_np = np.frombuffer(raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
                         if len(audio_np) > 8000:
+                            print("\n🛑 Transcribing audio with Faster-Whisper GPU...")
                             segments, _ = stt_model.transcribe(audio_np, beam_size=1)
                             user_text = " ".join([s.text for s in segments]).strip()
                             if user_text:
+                                print(f"🗣️ User: '{user_text}'")
                                 await websocket.send_text(json.dumps({"type": "user", "text": user_text}))
                                 await process_ai_voice(user_text, chat_history, websocket)
 
@@ -292,12 +299,14 @@ async def websocket_call(websocket: WebSocket):
                 payload = json.loads(message["text"])
                 if payload.get("type") == "text_prompt":
                     user_text = payload.get("text", "")
+                    print(f"\n💬 Text Prompt Received: '{user_text}'")
                     await process_ai_voice(user_text, chat_history, websocket)
 
     except WebSocketDisconnect:
-        print("🔌 Real-time voice session ended.")
+        print("\n🔌 Real-time voice session disconnected.\n")
 
 async def process_ai_voice(user_text, chat_history, websocket):
+    print("🧠 Querying Ollama LLM (qwen2.5:7b-instruct)...")
     chat_history.append(("User", user_text))
     if len(chat_history) > 8: chat_history = chat_history[-8:]
     
@@ -308,6 +317,7 @@ async def process_ai_voice(user_text, chat_history, websocket):
     res = requests.post(config.OLLAMA_URL, json={"model": config.OLLAMA_MODEL, "prompt": prompt, "stream": True, "keep_alive": -1}, stream=True)
     full_ai_reply = ""
     curr_sentence = ""
+    print("🤖 AI: ", end="", flush=True)
     
     for line in res.iter_lines():
         if line:
@@ -316,6 +326,7 @@ async def process_ai_voice(user_text, chat_history, websocket):
                 word = chunk_json.get("response", "")
                 curr_sentence += word
                 full_ai_reply += word
+                print(word, end="", flush=True)
                 
                 if any(p in word for p in ['.', '!', '?', ',']) and len(curr_sentence.strip()) > 2:
                     wav_io = io.BytesIO()
@@ -340,5 +351,6 @@ async def process_ai_voice(user_text, chat_history, websocket):
                 wav_file.writeframes(audio_chunk.audio_int16_bytes)
         await websocket.send_bytes(wav_io.getvalue())
         
+    print("\n👄 TTS Audio chunk sent to client.\n")
     await websocket.send_text(json.dumps({"type": "ai", "text": full_ai_reply.strip()}))
     chat_history.append(("AI", full_ai_reply.strip()))
