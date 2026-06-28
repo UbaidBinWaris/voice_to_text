@@ -2,7 +2,10 @@ import sys
 import time
 import numpy as np
 import sounddevice as sd
-import webrtcvad
+try:
+    import webrtcvad
+except ImportError:
+    import webrtcvad_fast as webrtcvad
 import requests
 import json
 import os

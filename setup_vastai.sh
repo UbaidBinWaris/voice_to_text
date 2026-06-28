@@ -3,19 +3,19 @@ echo "=================================================="
 echo " Setting up Low-Latency Voice AI on Vast.ai GPU"
 echo "=================================================="
 
-# Update and install system audio dependencies
-apt-get update && apt-get install -y ffmpeg libasound2-dev portaudio19-dev python3-pip git
+# Update and install system dependencies including python3-dev for C compilation
+apt-get update && apt-get install -y ffmpeg libasound2-dev portaudio19-dev python3-pip python3-dev git
 
-# Upgrade pip
-pip3 install --upgrade pip
+# Upgrade pip and build tools
+pip3 install --upgrade pip setuptools wheel
 
 # Install PyTorch with CUDA support if not present
 pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Install project requirements
-pip3 install faster-whisper piper-tts webrtcvad sounddevice requests numpy python-dotenv
+# Install project requirements (using webrtcvad-fast for modern Python 3.12 compatibility)
+pip3 install faster-whisper piper-tts webrtcvad-fast sounddevice requests numpy python-dotenv
 
-# Copy GPU environment configuration
+# Copy GPU environment configuration if no .env exists
 if [ ! -f .env ]; then
     echo "Copying .env.gpu to .env..."
     cp .env.gpu .env
