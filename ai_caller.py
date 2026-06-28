@@ -12,7 +12,7 @@ from piper.voice import PiperVoice
 # CONFIGURATION
 SAMPLE_RATE = 16000
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "my_gemma"
+OLLAMA_MODEL = "qwen2:0.5b"
 PIPER_MODEL = "piper_models/en_US-ryan-high.onnx"
 
 print("="*50)
