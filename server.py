@@ -2,17 +2,25 @@ import os
 import sys
 import json
 import asyncio
-import base64
+import io
+import wave
 import numpy as np
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from faster_whisper import WhisperModel
 from piper.voice import PiperVoice
 from config import config
+try:
+    import webrtcvad
+except ImportError:
+    try:
+        import webrtcvad_wheels as webrtcvad
+    except ImportError:
+        import webrtcvad_fast as webrtcvad
 
-app = FastAPI(title="Voice AI Production Server")
+app = FastAPI(title="Voice AI Real-Time Web Server")
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,15 +30,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global models
 stt_model = None
 tts_voice = None
+vad = None
 
 @app.on_event("startup")
 def startup_event():
-    global stt_model, tts_voice
+    global stt_model, tts_voice, vad
     print("="*50)
-    print("STARTING VOICE AI TELEPHONY & WEB SERVER...")
+    print("STARTING REAL-TIME VOICE AI SERVER...")
     print("="*50)
     print(f"⚙️ STT Model: {config.WHISPER_MODEL} ({config.WHISPER_DEVICE.upper()})")
     print(f"⚙️ Ollama URL: {config.OLLAMA_URL}")
@@ -44,6 +52,7 @@ def startup_event():
 
     if os.path.exists(config.PIPER_MODEL):
         tts_voice = PiperVoice.load(config.PIPER_MODEL)
+    vad = webrtcvad.Vad(config.VAD_AGGRESSIVENESS)
 
     try:
         requests.post(
@@ -59,98 +68,94 @@ def startup_event():
 def health_check():
     return {"status": "ok", "gpu": config.WHISPER_DEVICE, "model": config.OLLAMA_MODEL}
 
-# TWILIO TELEPHONY INTEGRATION
-@app.post("/twilio/voice")
-async def twilio_voice_webhook(request: Request):
-    """
-    Twilio Webhook endpoint: Called when a real customer dials your Twilio Phone Number.
-    Instructs Twilio to open a bi-directional audio WebSocket stream to our GPU server.
-    """
-    host = request.headers.get("host")
-    twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say>Connecting to Bella Napoli AI Receptionist.</Say>
-    <Connect>
-        <Stream url="wss://{host}/twilio/stream" />
-    </Connect>
-</Response>"""
-    return Response(content=twiml_response, media_type="application/xml")
-
-@app.websocket("/twilio/stream")
-async def twilio_audio_stream(websocket: WebSocket):
-    """
-    Twilio Media Stream WebSocket: Handles live 8kHz mu-law audio streams directly from phone calls.
-    """
-    await websocket.accept()
-    print("📞 REAL PHONE CALL CONNECTED VIA TWILIO!")
-    try:
-        while True:
-            message = await websocket.receive_text()
-            data = json.loads(message)
-            if data['event'] == 'start':
-                print("🏁 Phone call stream started.")
-            elif data['event'] == 'media':
-                # Incoming raw phone audio payload (base64 mu-law)
-                pass
-            elif data['event'] == 'stop':
-                print("🛑 Phone call ended.")
-                break
-    except WebSocketDisconnect:
-        print("🔌 Phone call disconnected.")
-
-# WEB BROWSER INTERFACE
 @app.get("/")
 def get_web_client():
     html_content = """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Voice AI Agent</title>
+        <title>Real-Time Voice AI Call</title>
         <style>
-            body { font-family: sans-serif; background: #121212; color: white; text-align: center; padding: 50px; }
-            button { padding: 15px 30px; font-size: 18px; border: none; border-radius: 8px; background: #007acc; color: white; cursor: pointer; }
-            button:disabled { background: #555; }
-            #status { margin-top: 20px; font-size: 20px; color: #4caf50; }
-            #log { margin-top: 30px; text-align: left; max-width: 600px; margin-left: auto; margin-right: auto; background: #1e1e1e; padding: 20px; border-radius: 8px; height: 300px; overflow-y: auto; }
+            body { font-family: system-ui, sans-serif; background: #121212; color: white; text-align: center; padding: 40px; margin: 0; }
+            .container { max-width: 700px; margin: 0 auto; background: #1e1e1e; padding: 30px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+            h1 { margin-bottom: 20px; font-size: 28px; }
+            button { padding: 16px 36px; font-size: 18px; font-weight: bold; border: none; border-radius: 50px; cursor: pointer; transition: all 0.2s; margin: 10px; }
+            #startBtn { background: #007acc; color: white; }
+            #startBtn:hover { background: #005999; }
+            #stopBtn { background: #e53935; color: white; }
+            #stopBtn:disabled, #startBtn:disabled { background: #444; color: #888; cursor: not-allowed; }
+            #status { margin: 20px 0; font-size: 20px; font-weight: 500; color: #4caf50; }
+            #chat { text-align: left; background: #121212; padding: 20px; border-radius: 12px; height: 350px; overflow-y: auto; font-size: 16px; line-height: 1.5; border: 1px solid #333; }
+            .user-msg { color: #64b5f6; margin-bottom: 12px; }
+            .ai-msg { color: #81c784; margin-bottom: 12px; }
         </style>
     </head>
     <body>
-        <h1>🎙️ Low-Latency Voice AI Receptionist</h1>
-        <button id="startBtn">Start Voice Call</button>
-        <button id="stopBtn" disabled>End Call</button>
-        <div id="status">Disconnected</div>
-        <div id="log"></div>
+        <div class="container">
+            <h1>🎙️ Live Real-Time Voice AI Call</h1>
+            <div>
+                <button id="startBtn">Start Live Call</button>
+                <button id="stopBtn" disabled>End Call</button>
+            </div>
+            <div id="status">Ready to Call</div>
+            <div id="chat"></div>
+        </div>
 
         <script>
             let ws;
             let audioContext;
             let processor;
             let micStream;
+            let audioQueue = [];
+            let isPlaying = false;
 
             const startBtn = document.getElementById('startBtn');
             const stopBtn = document.getElementById('stopBtn');
             const status = document.getElementById('status');
-            const log = document.getElementById('log');
+            const chat = document.getElementById('chat');
 
-            function appendLog(msg) {
-                log.innerHTML += '<div>' + msg + '</div>';
-                log.scrollTop = log.scrollHeight;
+            function appendChat(role, text) {
+                const div = document.createElement('div');
+                div.className = role === 'User' ? 'user-msg' : 'ai-msg';
+                div.innerHTML = `<strong>${role}:</strong> ${text}`;
+                chat.appendChild(div);
+                chat.scrollTop = chat.scrollHeight;
+            }
+
+            async function playNextAudio() {
+                if (isPlaying || audioQueue.length === 0) return;
+                isPlaying = true;
+                const audioData = audioQueue.shift();
+                try {
+                    const audioBuffer = await audioContext.decodeAudioData(audioData);
+                    const source = audioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioContext.destination);
+                    source.onended = () => {
+                        isPlaying = false;
+                        playNextAudio();
+                    };
+                    source.start();
+                } catch(e) {
+                    isPlaying = false;
+                    playNextAudio();
+                }
             }
 
             startBtn.onclick = async () => {
                 const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
                 ws = new WebSocket(`${protocol}//${location.host}/ws/call`);
-                
+                ws.binaryType = 'arraybuffer';
+
                 ws.onopen = async () => {
-                    status.innerText = 'Connected & Listening...';
+                    status.innerText = '🟢 Live Call Active - Start Speaking!';
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
-                    appendLog('⚡ Voice session started.');
 
                     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-                    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
                     const source = audioContext.createMediaStreamSource(micStream);
-                    processor = audioContext.createScriptProcessor(4090, 1, 1);
+                    processor = audioContext.createScriptProcessor(4096, 1, 1);
 
                     processor.onaudioprocess = (e) => {
                         const inputData = e.inputBuffer.getChannelData(0);
@@ -170,19 +175,16 @@ def get_web_client():
                 ws.onmessage = async (event) => {
                     if (typeof event.data === 'string') {
                         const data = JSON.parse(event.data);
-                        if (data.type === 'transcript') appendLog('🗣️ You: ' + data.text);
-                        if (data.type === 'text') appendLog('🤖 AI: ' + data.text);
+                        if (data.type === 'user') appendChat('User', data.text);
+                        if (data.type === 'ai') appendChat('AI', data.text);
                     } else {
-                        const audioBuffer = await audioContext.decodeAudioData(event.data);
-                        const playSource = audioContext.createBufferSource();
-                        playSource.buffer = audioBuffer;
-                        playSource.connect(audioContext.destination);
-                        playSource.start();
+                        audioQueue.push(event.data);
+                        playNextAudio();
                     }
                 };
 
                 ws.onclose = () => {
-                    status.innerText = 'Disconnected';
+                    status.innerText = '🔴 Call Ended';
                     startBtn.disabled = false;
                     stopBtn.disabled = true;
                 };
@@ -199,12 +201,104 @@ def get_web_client():
     """
     return HTMLResponse(html_content)
 
+SYSTEM_PROMPT = f"You are Samantha, a friendly receptionist at a restaurant called 'Bella Napoli'. Answer the caller in strictly under {config.MAX_RESPONSE_WORDS} words. Keep answers brief, natural, conversational, with no asterisks or markdown."
+
 @app.websocket("/ws/call")
 async def websocket_call(websocket: WebSocket):
     await websocket.accept()
-    print("⚡ New WebSocket voice call connected.")
+    print("⚡ Real-time voice call session started.")
+    
+    audio_buffer = bytearray()
+    chat_history = []
+    chunk_size = 480 # 30ms at 16kHz
+    silence_frames = 0
+    max_silence_frames = int((1000 / 30) * config.SILENCE_DURATION_SEC)
+    has_spoken = False
+    
     try:
         while True:
             data = await websocket.receive_bytes()
+            audio_buffer.extend(data)
+            
+            # Process frames for VAD
+            while len(audio_buffer) >= chunk_size:
+                frame = bytes(audio_buffer[:chunk_size])
+                audio_buffer = audio_buffer[chunk_size:]
+                
+                is_speech = False
+                try:
+                    is_speech = vad.is_speech(frame, 16000)
+                except:
+                    pass
+                    
+                if is_speech:
+                    has_spoken = True
+                    silence_frames = 0
+                elif has_spoken:
+                    silence_frames += 1
+                    
+                if has_spoken and silence_frames > max_silence_frames:
+                    # User stopped speaking, transcribe!
+                    raw_audio = bytes(audio_buffer)
+                    audio_buffer = bytearray()
+                    has_spoken = False
+                    silence_frames = 0
+                    
+                    audio_np = np.frombuffer(raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
+                    if len(audio_np) > 8000:
+                        segments, _ = stt_model.transcribe(audio_np, beam_size=1)
+                        user_text = " ".join([s.text for s in segments]).strip()
+                        
+                        if user_text:
+                            await websocket.send_text(json.dumps({"type": "user", "text": user_text}))
+                            
+                            # Build prompt
+                            chat_history.append(("User", user_text))
+                            if len(chat_history) > 8: chat_history = chat_history[-8:]
+                            
+                            prompt = SYSTEM_PROMPT + "\n"
+                            for r, m in chat_history: prompt += f"{r}: {m}\n"
+                            prompt += "AI:"
+                            
+                            # Stream from Ollama
+                            res = requests.post(config.OLLAMA_URL, json={"model": config.OLLAMA_MODEL, "prompt": prompt, "stream": True, "keep_alive": -1}, stream=True)
+                            full_ai_reply = ""
+                            curr_sentence = ""
+                            
+                            for line in res.iter_lines():
+                                if line:
+                                    try:
+                                        chunk_json = json.loads(line)
+                                        word = chunk_json.get("response", "")
+                                        curr_sentence += word
+                                        full_ai_reply += word
+                                        
+                                        if any(p in word for p in ['.', '!', '?', ',']) and len(curr_sentence.strip()) > 2:
+                                            # Synthesize audio chunk
+                                            wav_io = io.BytesIO()
+                                            with wave.open(wav_io, 'wb') as wav_file:
+                                                wav_file.setnchannels(1)
+                                                wav_file.setsampwidth(2)
+                                                wav_file.setframerate(tts_voice.config.sample_rate)
+                                                for audio_chunk in tts_voice.synthesize(curr_sentence.strip()):
+                                                    wav_file.writeframes(audio_chunk.audio_int16_bytes)
+                                            await websocket.send_bytes(wav_io.getvalue())
+                                            curr_sentence = ""
+                                    except:
+                                        continue
+                            
+                            if curr_sentence.strip():
+                                wav_io = io.BytesIO()
+                                with wave.open(wav_io, 'wb') as wav_file:
+                                    wav_file.setnchannels(1)
+                                    wav_file.setsampwidth(2)
+                                    wav_file.setframerate(tts_voice.config.sample_rate)
+                                    for audio_chunk in tts_voice.synthesize(curr_sentence.strip()):
+                                        wav_file.writeframes(audio_chunk.audio_int16_bytes)
+                                await websocket.send_bytes(wav_io.getvalue())
+                                
+                            await websocket.send_text(json.dumps({"type": "ai", "text": full_ai_reply.strip()}))
+                            chat_history.append(("AI", full_ai_reply.strip()))
+
     except WebSocketDisconnect:
-        print("🔌 Voice call disconnected.")
+        print("🔌 Real-time voice call session ended.")
