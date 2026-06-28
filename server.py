@@ -106,6 +106,8 @@ def get_web_client():
             window.mediaRecorder = null;
             window.micStream = null;
             window.audioContext = null;
+            let recordedChunks = [];
+            let recordInterval = null;
             let audioQueue = [];
             let isPlaying = false;
 
@@ -172,6 +174,28 @@ def get_web_client():
                 });
             }
 
+            function startRecordingCycle(mimeType) {
+                recordedChunks = [];
+                window.mediaRecorder = new MediaRecorder(window.micStream, { mimeType: mimeType });
+                
+                window.mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        recordedChunks.push(e.data);
+                    }
+                };
+
+                window.mediaRecorder.onstop = () => {
+                    if (recordedChunks.length > 0 && window.ws && window.ws.readyState === WebSocket.OPEN) {
+                        const blob = new Blob(recordedChunks, { type: mimeType });
+                        blob.arrayBuffer().then(buffer => {
+                            window.ws.send(buffer);
+                        });
+                    }
+                };
+
+                window.mediaRecorder.start();
+            }
+
             startBtn.onclick = async () => {
                 try {
                     await connectWebSocket();
@@ -182,17 +206,16 @@ def get_web_client():
                         mimeType = 'audio/ogg';
                     }
 
-                    window.mediaRecorder = new MediaRecorder(window.micStream, { mimeType: mimeType });
-                    
-                    window.mediaRecorder.ondataavailable = (e) => {
-                        if (e.data.size > 0 && window.ws && window.ws.readyState === WebSocket.OPEN) {
-                            e.data.arrayBuffer().then(buffer => {
-                                window.ws.send(buffer);
-                            });
-                        }
-                    };
+                    startRecordingCycle(mimeType);
 
-                    window.mediaRecorder.start(250); // Send audio slice every 250ms
+                    // Cycle recorder every 2.5 seconds so every slice has a valid container header
+                    recordInterval = setInterval(() => {
+                        if (window.mediaRecorder && window.mediaRecorder.state === 'recording') {
+                            window.mediaRecorder.stop();
+                            startRecordingCycle(mimeType);
+                        }
+                    }, 2500);
+
                     status.innerText = '🟢 Live Microphone Active - Speak Now!';
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
@@ -217,6 +240,7 @@ def get_web_client():
             textInput.onkeypress = (e) => { if (e.key === 'Enter') sendTextMessage(); };
 
             stopBtn.onclick = () => {
+                if (recordInterval) clearInterval(recordInterval);
                 if (window.ws) window.ws.close();
                 if (window.mediaRecorder && window.mediaRecorder.state !== 'inactive') window.mediaRecorder.stop();
                 if (window.micStream) window.micStream.getTracks().forEach(track => track.stop());
@@ -236,9 +260,7 @@ async def websocket_call(websocket: WebSocket):
     print("⚡ NEW REAL-TIME MEDIARECORDER SESSION CONNECTED")
     print("="*50)
     
-    audio_chunks = bytearray()
     chat_history = []
-    last_process_time = asyncio.get_event_loop().time()
     
     try:
         while True:
@@ -250,23 +272,16 @@ async def websocket_call(websocket: WebSocket):
                 break
                 
             if "bytes" in message and message["bytes"]:
-                data = message["bytes"]
-                audio_chunks.extend(data)
+                raw_bytes = message["bytes"]
                 
-                now = asyncio.get_event_loop().time()
-                # Accumulate audio and process every 2.0 seconds of recording
-                if now - last_process_time >= 2.0 and len(audio_chunks) > 10000:
-                    raw_bytes = bytes(audio_chunks)
-                    audio_chunks = bytearray()
-                    last_process_time = now
-                    
-                    # Process directly via tempfile for ffmpeg/Faster-Whisper decoding
+                if len(raw_bytes) > 2000:
+                    # Save complete WebM container slice to tempfile for FFmpeg decoding
                     with tempfile.NamedTemporaryFile(suffix=".webm", delete=True) as tmp:
                         tmp.write(raw_bytes)
                         tmp.flush()
                         
                         try:
-                            print("\n🛑 Transcribing WebM audio slice with Faster-Whisper GPU...")
+                            print("\n🛑 Transcribing voice slice with Faster-Whisper GPU...")
                             segments, _ = stt_model.transcribe(tmp.name, beam_size=1)
                             user_text = " ".join([s.text for s in segments]).strip()
                             if user_text and len(user_text) > 1:
@@ -274,7 +289,7 @@ async def websocket_call(websocket: WebSocket):
                                 await websocket.send_text(json.dumps({"type": "user", "text": user_text}))
                                 await process_ai_voice(user_text, chat_history, websocket)
                         except Exception as stt_err:
-                            print(f"⚠️ STT error: {stt_err}")
+                            print(f"⚠️ STT note: {stt_err}")
 
             elif "text" in message and message["text"]:
                 payload = json.loads(message["text"])
