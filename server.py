@@ -91,7 +91,6 @@ def get_web_client():
             .input-box { display: flex; gap: 10px; }
             .input-box input { flex: 1; padding: 14px; border-radius: 8px; border: 1px solid #444; background: #2a2a2a; color: white; font-size: 16px; }
             .input-box button { margin: 0; padding: 14px 24px; border-radius: 8px; background: #4caf50; }
-            .notice { font-size: 14px; color: #ffca28; margin-top: 15px; }
         </style>
     </head>
     <body>
@@ -111,10 +110,11 @@ def get_web_client():
         </div>
 
         <script>
-            let ws;
-            let audioContext;
-            let processor;
-            let micStream;
+            window.ws = null;
+            window.audioContext = null;
+            window.processor = null;
+            window.micStream = null;
+            window.sourceNode = null;
             let audioQueue = [];
             let isPlaying = false;
 
@@ -138,13 +138,13 @@ def get_web_client():
                 isPlaying = true;
                 const audioData = audioQueue.shift();
                 try {
-                    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-                    if (audioContext.state === 'suspended') await audioContext.resume();
+                    if (!window.audioContext) window.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                    if (window.audioContext.state === 'suspended') await window.audioContext.resume();
                     
-                    const audioBuffer = await audioContext.decodeAudioData(audioData);
-                    const source = audioContext.createBufferSource();
+                    const audioBuffer = await window.audioContext.decodeAudioData(audioData);
+                    const source = window.audioContext.createBufferSource();
                     source.buffer = audioBuffer;
-                    source.connect(audioContext.destination);
+                    source.connect(window.audioContext.destination);
                     source.onended = () => {
                         isPlaying = false;
                         playNextAudio();
@@ -159,11 +159,11 @@ def get_web_client():
             function connectWebSocket() {
                 return new Promise((resolve, reject) => {
                     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    ws = new WebSocket(`${protocol}//${location.host}/ws/call`);
-                    ws.binaryType = 'arraybuffer';
-                    ws.onopen = () => resolve();
-                    ws.onerror = (err) => reject(err);
-                    ws.onmessage = async (event) => {
+                    window.ws = new WebSocket(`${protocol}//${location.host}/ws/call`);
+                    window.ws.binaryType = 'arraybuffer';
+                    window.ws.onopen = () => resolve();
+                    window.ws.onerror = (err) => reject(err);
+                    window.ws.onmessage = async (event) => {
                         if (typeof event.data === 'string') {
                             const data = JSON.parse(event.data);
                             if (data.type === 'user') appendChat('User', data.text);
@@ -173,7 +173,7 @@ def get_web_client():
                             playNextAudio();
                         }
                     };
-                    ws.onclose = () => {
+                    window.ws.onclose = () => {
                         status.innerText = '🔴 Connection Closed';
                         startBtn.disabled = false;
                         stopBtn.disabled = true;
@@ -184,26 +184,26 @@ def get_web_client():
             startBtn.onclick = async () => {
                 try {
                     await connectWebSocket();
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-                    if (audioContext.state === 'suspended') await audioContext.resume();
+                    window.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                    if (window.audioContext.state === 'suspended') await window.audioContext.resume();
                     
-                    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-                    const source = audioContext.createMediaStreamSource(micStream);
-                    processor = audioContext.createScriptProcessor(4096, 1, 1);
+                    window.micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+                    window.sourceNode = window.audioContext.createMediaStreamSource(window.micStream);
+                    window.processor = window.audioContext.createScriptProcessor(4096, 1, 1);
 
-                    processor.onaudioprocess = (e) => {
+                    window.processor.onaudioprocess = (e) => {
                         const inputData = e.inputBuffer.getChannelData(0);
                         const int16Data = new Int16Array(inputData.length);
                         for (let i = 0; i < inputData.length; i++) {
                             int16Data[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
                         }
-                        if (ws && ws.readyState === WebSocket.OPEN) {
-                            ws.send(int16Data.buffer);
+                        if (window.ws && window.ws.readyState === WebSocket.OPEN) {
+                            window.ws.send(int16Data.buffer);
                         }
                     };
 
-                    source.connect(processor);
-                    processor.connect(audioContext.destination);
+                    window.sourceNode.connect(window.processor);
+                    window.processor.connect(window.audioContext.destination);
                     status.innerText = '🟢 Live Microphone Active - Speak Now!';
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
@@ -218,11 +218,11 @@ def get_web_client():
             async function sendTextMessage() {
                 const txt = textInput.value.trim();
                 if (!txt) return;
-                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                if (!window.ws || window.ws.readyState !== WebSocket.OPEN) {
                     await connectWebSocket();
                 }
                 appendChat('User', txt);
-                ws.send(JSON.stringify({ type: 'text_prompt', text: txt }));
+                window.ws.send(JSON.stringify({ type: 'text_prompt', text: txt }));
                 textInput.value = '';
             }
 
@@ -230,9 +230,9 @@ def get_web_client():
             textInput.onkeypress = (e) => { if (e.key === 'Enter') sendTextMessage(); };
 
             stopBtn.onclick = () => {
-                if (ws) ws.close();
-                if (micStream) micStream.getTracks().forEach(track => track.stop());
-                if (audioContext) audioContext.close();
+                if (window.ws) window.ws.close();
+                if (window.micStream) window.micStream.getTracks().forEach(track => track.stop());
+                if (window.audioContext) window.audioContext.close();
             };
         </script>
     </body>
@@ -266,7 +266,7 @@ async def websocket_call(websocket: WebSocket):
                 audio_buffer.extend(data)
                 bytes_received_counter += len(data)
                 
-                if bytes_received_counter % 160000 == 0:
+                if bytes_received_counter % 80000 == 0:
                     print(f"📥 Received {bytes_received_counter} bytes of audio from mic stream...", end="\r", flush=True)
                 
                 while len(audio_buffer) >= chunk_size:
