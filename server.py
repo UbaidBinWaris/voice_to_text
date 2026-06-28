@@ -108,7 +108,6 @@ def get_web_client():
                 <input type="text" id="textInput" placeholder="Type a prompt to test instant GPU AI voice streaming..." />
                 <button id="sendBtn">Send & Speak</button>
             </div>
-            <div class="notice">💡 Tip: Browsers require HTTPS for mic prompts over external IPs. Use the text box or Chrome SSL flag to test mic streaming live!</div>
         </div>
 
         <script>
@@ -248,6 +247,7 @@ async def websocket_call(websocket: WebSocket):
     print("="*50)
     
     audio_buffer = bytearray()
+    speech_accumulator = bytearray()
     chat_history = []
     chunk_size = 480 # 30ms at 16kHz
     silence_frames = 0
@@ -276,17 +276,19 @@ async def websocket_call(websocket: WebSocket):
                             print("🎤 Hearing user audio...", end="\r", flush=True)
                         has_spoken = True
                         silence_frames = 0
+                        speech_accumulator.extend(frame)
                     elif has_spoken:
                         silence_frames += 1
+                        speech_accumulator.extend(frame)
                         
                     if has_spoken and silence_frames > max_silence_frames:
-                        raw_audio = bytes(audio_buffer)
-                        audio_buffer = bytearray()
+                        raw_audio = bytes(speech_accumulator)
+                        speech_accumulator = bytearray()
                         has_spoken = False
                         silence_frames = 0
                         
                         audio_np = np.frombuffer(raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
-                        if len(audio_np) > 8000:
+                        if len(audio_np) > 4000:
                             print("\n🛑 Transcribing audio with Faster-Whisper GPU...")
                             segments, _ = stt_model.transcribe(audio_np, beam_size=1)
                             user_text = " ".join([s.text for s in segments]).strip()
