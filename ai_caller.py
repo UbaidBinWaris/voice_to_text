@@ -5,7 +5,10 @@ import sounddevice as sd
 try:
     import webrtcvad
 except ImportError:
-    import webrtcvad_fast as webrtcvad
+    try:
+        import webrtcvad_wheels as webrtcvad
+    except ImportError:
+        import webrtcvad_fast as webrtcvad
 import requests
 import json
 import os
