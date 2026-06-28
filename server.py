@@ -110,6 +110,7 @@ def get_web_client():
             let recordInterval = null;
             let audioQueue = [];
             let isPlaying = false;
+            let isAISpeaking = false;
 
             const startBtn = document.getElementById('startBtn');
             const stopBtn = document.getElementById('stopBtn');
@@ -127,8 +128,12 @@ def get_web_client():
             }
 
             async function playNextAudio() {
-                if (isPlaying || audioQueue.length === 0) return;
+                if (isPlaying || audioQueue.length === 0) {
+                    if (audioQueue.length === 0) isAISpeaking = false;
+                    return;
+                }
                 isPlaying = true;
+                isAISpeaking = true;
                 const audioData = audioQueue.shift();
                 try {
                     if (!window.audioContext) window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -140,11 +145,13 @@ def get_web_client():
                     source.connect(window.audioContext.destination);
                     source.onended = () => {
                         isPlaying = false;
+                        if (audioQueue.length === 0) isAISpeaking = false;
                         playNextAudio();
                     };
                     source.start();
                 } catch(e) {
                     isPlaying = false;
+                    if (audioQueue.length === 0) isAISpeaking = false;
                     playNextAudio();
                 }
             }
@@ -179,13 +186,13 @@ def get_web_client():
                 window.mediaRecorder = new MediaRecorder(window.micStream, { mimeType: mimeType });
                 
                 window.mediaRecorder.ondataavailable = (e) => {
-                    if (e.data.size > 0) {
+                    if (e.data.size > 0 && !isAISpeaking) {
                         recordedChunks.push(e.data);
                     }
                 };
 
                 window.mediaRecorder.onstop = () => {
-                    if (recordedChunks.length > 0 && window.ws && window.ws.readyState === WebSocket.OPEN) {
+                    if (recordedChunks.length > 0 && !isAISpeaking && window.ws && window.ws.readyState === WebSocket.OPEN) {
                         const blob = new Blob(recordedChunks, { type: mimeType });
                         blob.arrayBuffer().then(buffer => {
                             window.ws.send(buffer);
@@ -208,7 +215,6 @@ def get_web_client():
 
                     startRecordingCycle(mimeType);
 
-                    // Cycle recorder every 2.5 seconds so every slice has a valid container header
                     recordInterval = setInterval(() => {
                         if (window.mediaRecorder && window.mediaRecorder.state === 'recording') {
                             window.mediaRecorder.stop();
@@ -253,6 +259,9 @@ def get_web_client():
 
 SYSTEM_PROMPT = f"You are Samantha, a friendly receptionist at a restaurant called 'Bella Napoli'. Answer the caller in strictly under {config.MAX_RESPONSE_WORDS} words. Keep answers brief, natural, conversational, with no asterisks or markdown."
 
+# Common Whisper hallucinations on quiet background noise
+HALLUCINATIONS = ["thank you.", "thanks for watching.", "subtitles by", "thank you!", "you", "bye.", "amara.org"]
+
 @app.websocket("/ws/call")
 async def websocket_call(websocket: WebSocket):
     await websocket.accept()
@@ -275,21 +284,22 @@ async def websocket_call(websocket: WebSocket):
                 raw_bytes = message["bytes"]
                 
                 if len(raw_bytes) > 2000:
-                    # Save complete WebM container slice to tempfile for FFmpeg decoding
                     with tempfile.NamedTemporaryFile(suffix=".webm", delete=True) as tmp:
                         tmp.write(raw_bytes)
                         tmp.flush()
                         
                         try:
-                            print("\n🛑 Transcribing voice slice with Faster-Whisper GPU...")
                             segments, _ = stt_model.transcribe(tmp.name, beam_size=1)
                             user_text = " ".join([s.text for s in segments]).strip()
-                            if user_text and len(user_text) > 1:
+                            
+                            # Filter out Whisper silence hallucinations
+                            if user_text and user_text.lower() not in HALLUCINATIONS and len(user_text) > 1:
+                                print(f"\n🛑 Transcribed voice slice with Faster-Whisper GPU...")
                                 print(f"🗣️ User: '{user_text}'")
                                 await websocket.send_text(json.dumps({"type": "user", "text": user_text}))
                                 await process_ai_voice(user_text, chat_history, websocket)
                         except Exception as stt_err:
-                            print(f"⚠️ STT note: {stt_err}")
+                            pass
 
             elif "text" in message and message["text"]:
                 payload = json.loads(message["text"])
