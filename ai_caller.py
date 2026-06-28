@@ -42,18 +42,18 @@ tts_voice = PiperVoice.load(config.PIPER_MODEL)
 # 3. Load VAD
 vad = webrtcvad.Vad(config.VAD_AGGRESSIVENESS)
 
-# 4. Warm up the LLM (Prevents slow cold-starts on the first turn)
-print("Warming up Brain (Loading model into memory)...", end="\r")
+# 4. Warm up the LLM & Pin into GPU VRAM (keep_alive: -1)
+print("Warming up Brain (Loading model weights into GPU VRAM)...", end="\r")
 try:
     requests.post(
         config.OLLAMA_URL, 
-        json={"model": config.OLLAMA_MODEL, "prompt": "Hi", "stream": False, "options": {"num_predict": 1}}, 
-        timeout=10
+        json={"model": config.OLLAMA_MODEL, "prompt": "Hi", "stream": False, "keep_alive": -1, "options": {"num_predict": 1}}, 
+        timeout=30
     )
 except Exception as e:
     print(f"\n⚠️ Note: Could not warm up Ollama ({e}). Ensure Ollama is running.")
 
-print("✅ AI Fully Loaded and Ready.                  \n")
+print("✅ AI Fully Loaded and Ready in GPU VRAM.         \n")
 
 SYSTEM_PROMPT = f"You are Samantha, a friendly receptionist at a highly-rated Italian restaurant called 'Bella Napoli'. You are taking a live phone call from a customer. You can help them book a table, ask about the menu, or answer questions about business hours (open 5 PM to 10 PM daily). Your responses MUST be strictly under {config.MAX_RESPONSE_WORDS} words. Keep your answers brief, natural, and conversational. Do not use emojis, asterisks, or markdown formatting, just plain spoken text.\n\n"
 chat_history = []
@@ -74,7 +74,8 @@ def ask_ollama_streaming(prompt):
     payload = {
         "model": config.OLLAMA_MODEL,
         "prompt": full_prompt,
-        "stream": True
+        "stream": True,
+        "keep_alive": -1
     }
     
     try:

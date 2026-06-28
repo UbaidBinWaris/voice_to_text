@@ -16,6 +16,24 @@ print(f"⚙️  Ollama URL: {config.OLLAMA_URL}")
 print(f"⚙️  Ollama Model: {config.OLLAMA_MODEL}")
 print("="*50)
 
+# Warm up Ollama and keep model permanently loaded in GPU VRAM (keep_alive: -1)
+print("🔥 Warming up LLM (loading weights into GPU VRAM)...", end="\r")
+try:
+    requests.post(
+        config.OLLAMA_URL, 
+        json={
+            "model": config.OLLAMA_MODEL, 
+            "prompt": "Hi", 
+            "stream": False, 
+            "keep_alive": -1,
+            "options": {"num_predict": 1}
+        }, 
+        timeout=30
+    )
+    print("✅ LLM loaded into GPU VRAM.                          ")
+except Exception as e:
+    print(f"\n⚠️ Warmup note: {e}")
+
 try:
     stt_model = WhisperModel(config.WHISPER_MODEL, device=config.WHISPER_DEVICE, compute_type=config.WHISPER_COMPUTE_TYPE)
 except Exception as e:
@@ -36,7 +54,7 @@ for chunk in tts_voice.synthesize(test_text):
 audio_np = np.concatenate(test_audio).flatten().astype(np.float32) / 32768.0
 
 print("\n" + "="*50)
-print("🚀 STARTING LATENCY BENCHMARK")
+print("🚀 STARTING LATENCY BENCHMARK (Warm GPU)")
 print("="*50)
 
 # 1. STT BENCHMARK
@@ -52,7 +70,8 @@ print(f"⏱️  STT Processing Time: {stt_time:.3f} seconds\n")
 payload = {
     "model": config.OLLAMA_MODEL,
     "prompt": f"You are a helpful AI. Keep your answers brief. User: {user_text}\nAI:",
-    "stream": True
+    "stream": True,
+    "keep_alive": -1
 }
 
 start_llm = time.time()
