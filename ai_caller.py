@@ -32,18 +32,36 @@ if not os.path.exists(PIPER_MODEL):
 tts_voice = PiperVoice.load(PIPER_MODEL)
 
 # 3. Load VAD
-vad = webrtcvad.Vad(2) # 0 to 3 aggression
-print("✅ AI Fully Loaded and Ready.\n")
+vad = webrtcvad.Vad(3) # 0 to 3 aggression (3 is most aggressive at filtering noise)
 
-conversation_history = f"You are Samantha, a friendly receptionist at a highly-rated Italian restaurant called 'Bella Napoli'. You are taking a live phone call from a customer. You can help them book a table, ask about the menu, or answer questions about business hours (open 5 PM to 10 PM daily). Your responses MUST be strictly under {MAX_RESPONSE_WORDS} words. Keep your answers brief, natural, and conversational. Do not use emojis, asterisks, or markdown formatting, just plain spoken text.\n\n"
+# 4. Warm up the LLM (Prevents slow cold-starts on the first turn)
+print("Warming up Brain (Loading model into memory)...", end="\r")
+try:
+    requests.post(OLLAMA_URL, json={"model": OLLAMA_MODEL, "prompt": "Hi", "stream": False, "options": {"num_predict": 1}}, timeout=10)
+except:
+    pass
+
+print("✅ AI Fully Loaded and Ready.                  \n")
+
+SYSTEM_PROMPT = f"You are Samantha, a friendly receptionist at a highly-rated Italian restaurant called 'Bella Napoli'. You are taking a live phone call from a customer. You can help them book a table, ask about the menu, or answer questions about business hours (open 5 PM to 10 PM daily). Your responses MUST be strictly under {MAX_RESPONSE_WORDS} words. Keep your answers brief, natural, and conversational. Do not use emojis, asterisks, or markdown formatting, just plain spoken text.\n\n"
+chat_history = []
 
 def ask_ollama_streaming(prompt):
-    global conversation_history
-    conversation_history += f"User: {prompt}\nAI:"
+    global chat_history
+    chat_history.append(("User", prompt))
+    
+    # Keep only the last 4 turns (8 messages) to prevent CPU slowdowns!
+    if len(chat_history) > 8:
+        chat_history = chat_history[-8:]
+        
+    full_prompt = SYSTEM_PROMPT
+    for role, msg in chat_history:
+        full_prompt += f"{role}: {msg}\n"
+    full_prompt += "AI:"
     
     payload = {
         "model": OLLAMA_MODEL,
-        "prompt": conversation_history,
+        "prompt": full_prompt,
         "stream": True
     }
     
@@ -88,11 +106,11 @@ def ask_ollama_streaming(prompt):
     out_stream.stop()
     out_stream.close()
     print("\n")
-    conversation_history += f" {full_reply}\n"
+    chat_history.append(("AI", full_reply.strip()))
 
 def record_audio_vad():
     print("\n" + "-"*50)
-    print("Listening... (Speak to start, pause for 1.5s to submit)")
+    print("Listening... (Speak to start, pause for 0.6s to submit)")
     
     audio_data = []
     chunk_duration_ms = 30 
@@ -103,6 +121,8 @@ def record_audio_vad():
     
     silence_frames = 0
     max_silence_frames = int(1000 / chunk_duration_ms) * 0.6 # 0.6 seconds of silence
+    max_total_frames = int(1000 / chunk_duration_ms) * 15 # 15 seconds hard limit
+    total_frames = 0
     has_spoken = False
     
     while True:
@@ -115,6 +135,11 @@ def record_audio_vad():
         except:
             pass
             
+        if has_spoken:
+            total_frames += 1
+            if total_frames > max_total_frames:
+                break # Hard cutoff after 15s to prevent infinite hanging
+                
         if is_speech:
             if not has_spoken:
                 print("🎤 Hearing you...", end="\r")
