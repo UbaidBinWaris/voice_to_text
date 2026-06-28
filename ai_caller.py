@@ -1,7 +1,11 @@
 import sys
 import time
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except Exception as e:
+    sd = None
+
 try:
     import webrtcvad
 except ImportError:
@@ -23,6 +27,13 @@ print(f"⚙️  STT Model: {config.WHISPER_MODEL} ({config.WHISPER_DEVICE.upper(
 print(f"⚙️  Ollama URL: {config.OLLAMA_URL}")
 print(f"⚙️  Ollama Model: {config.OLLAMA_MODEL}")
 print("="*50)
+
+# Check sounddevice availability
+if sd is None:
+    print("❌ Error: Sounddevice could not be initialized.")
+    print("💡 Cloud servers (Vast.ai) do not have physical sound cards/microphones attached.")
+    print("👉 Run 'python3 server.py' on this server to connect via web browser microphone!")
+    sys.exit(1)
 
 # 1. Load STT
 print("Loading Ears (Faster Whisper)...")
@@ -62,7 +73,6 @@ def ask_ollama_streaming(prompt):
     global chat_history
     chat_history.append(("User", prompt))
     
-    # Keep only the last 4 turns (8 messages) to prevent context slowdowns
     if len(chat_history) > 8:
         chat_history = chat_history[-8:]
         
@@ -88,9 +98,12 @@ def ask_ollama_streaming(prompt):
     current_sentence = ""
     full_reply = ""
     
-    # Open streaming audio output (plays instantly)
-    out_stream = sd.RawOutputStream(samplerate=tts_voice.config.sample_rate, channels=1, dtype='int16')
-    out_stream.start()
+    try:
+        out_stream = sd.RawOutputStream(samplerate=tts_voice.config.sample_rate, channels=1, dtype='int16')
+        out_stream.start()
+    except Exception as e:
+        print(f"\n❌ Audio output error: {e}")
+        return
     
     for line in response.iter_lines():
         if line:
@@ -102,16 +115,13 @@ def ask_ollama_streaming(prompt):
             current_sentence += word
             full_reply += word
             
-            # Print word so user sees it live
             print(word, end="", flush=True)
             
-            # End of sentence detection (streams to voice)
             if any(punct in word for punct in ['.', '!', '?', '\n', ',']) and len(current_sentence.strip()) > 2:
                 for audio_chunk in tts_voice.synthesize(current_sentence.strip()):
                     out_stream.write(audio_chunk.audio_int16_bytes)
                 current_sentence = ""
                 
-    # Flush any remaining words
     if current_sentence.strip():
         for audio_chunk in tts_voice.synthesize(current_sentence.strip()):
             out_stream.write(audio_chunk.audio_int16_bytes)
@@ -127,14 +137,20 @@ def record_audio_vad():
     
     audio_data = []
     chunk_duration_ms = 30 
-    chunk_size = int(config.SAMPLE_RATE * chunk_duration_ms / 1000) # 480 samples
+    chunk_size = int(config.SAMPLE_RATE * chunk_duration_ms / 1000)
     
-    stream = sd.RawInputStream(samplerate=config.SAMPLE_RATE, channels=1, dtype='int16', blocksize=chunk_size)
-    stream.start()
-    
+    try:
+        stream = sd.RawInputStream(samplerate=config.SAMPLE_RATE, channels=1, dtype='int16', blocksize=chunk_size)
+        stream.start()
+    except Exception as e:
+        print(f"\n❌ Audio hardware error ({e}).")
+        print("💡 Vast.ai cloud servers do not have physical microphones attached.")
+        print("👉 Run 'python3 server.py' on this server to connect your laptop microphone via web browser!")
+        sys.exit(1)
+        
     silence_frames = 0
     max_silence_frames = int((1000 / chunk_duration_ms) * config.SILENCE_DURATION_SEC)
-    max_total_frames = int((1000 / chunk_duration_ms) * 15) # 15 seconds hard limit
+    max_total_frames = int((1000 / chunk_duration_ms) * 15)
     total_frames = 0
     has_spoken = False
     
@@ -151,7 +167,7 @@ def record_audio_vad():
         if has_spoken:
             total_frames += 1
             if total_frames > max_total_frames:
-                break # Hard cutoff after 15s to prevent infinite hanging
+                break
                 
         if is_speech:
             if not has_spoken:
@@ -184,7 +200,7 @@ print("="*50)
 while True:
     try:
         audio = record_audio_vad()
-        if len(audio) < config.SAMPLE_RATE * 0.5: # Ignore if too short
+        if len(audio) < config.SAMPLE_RATE * 0.5:
             continue
             
         # 1. Ears
@@ -197,11 +213,13 @@ while True:
         print(f"🗣️ You: {user_text}")
         print(f"🤖 AI:  ", end="", flush=True)
         
-        # 2. Brain & 3. Mouth (Streaming concurrently)
+        # 2. Brain & 3. Mouth
         ask_ollama_streaming(user_text)
         
     except KeyboardInterrupt:
         print("\nEnding call. Goodbye!")
+        break
+    except SystemExit:
         break
     except Exception as e:
         print(f"\nAn error occurred: {e}")
