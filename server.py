@@ -138,7 +138,7 @@ def get_web_client():
                 isPlaying = true;
                 const audioData = audioQueue.shift();
                 try {
-                    if (!window.audioContext) window.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                    if (!window.audioContext) window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
                     if (window.audioContext.state === 'suspended') await window.audioContext.resume();
                     
                     const audioBuffer = await window.audioContext.decodeAudioData(audioData);
@@ -181,21 +181,46 @@ def get_web_client():
                 });
             }
 
+            function downsampleBuffer(buffer, sampleRate, outSampleRate) {
+                if (outSampleRate === sampleRate) return buffer;
+                const sampleRateRatio = sampleRate / outSampleRate;
+                const newLength = Math.round(buffer.length / sampleRateRatio);
+                const result = new Float32Array(newLength);
+                let offsetResult = 0;
+                let offsetBuffer = 0;
+                while (offsetResult < result.length) {
+                    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+                    let accum = 0, count = 0;
+                    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                        accum += buffer[i];
+                        count++;
+                    }
+                    result[offsetResult] = accum / count;
+                    offsetResult++;
+                    offsetBuffer = nextOffsetBuffer;
+                }
+                return result;
+            }
+
             startBtn.onclick = async () => {
                 try {
                     await connectWebSocket();
-                    window.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                    // Firefox hardware native AudioContext initialization
+                    window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
                     if (window.audioContext.state === 'suspended') await window.audioContext.resume();
                     
                     window.micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
                     window.sourceNode = window.audioContext.createMediaStreamSource(window.micStream);
                     window.processor = window.audioContext.createScriptProcessor(4096, 1, 1);
 
+                    const nativeSampleRate = window.audioContext.sampleRate;
+
                     window.processor.onaudioprocess = (e) => {
                         const inputData = e.inputBuffer.getChannelData(0);
-                        const int16Data = new Int16Array(inputData.length);
-                        for (let i = 0; i < inputData.length; i++) {
-                            int16Data[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+                        const resampledData = downsampleBuffer(inputData, nativeSampleRate, 16000);
+                        const int16Data = new Int16Array(resampledData.length);
+                        for (let i = 0; i < resampledData.length; i++) {
+                            int16Data[i] = Math.max(-1, Math.min(1, resampledData[i])) * 0x7FFF;
                         }
                         if (window.ws && window.ws.readyState === WebSocket.OPEN) {
                             window.ws.send(int16Data.buffer);
