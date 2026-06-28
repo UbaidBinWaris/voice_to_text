@@ -28,13 +28,6 @@ print(f"⚙️  Ollama URL: {config.OLLAMA_URL}")
 print(f"⚙️  Ollama Model: {config.OLLAMA_MODEL}")
 print("="*50)
 
-# Check sounddevice availability
-if sd is None:
-    print("❌ Error: Sounddevice could not be initialized.")
-    print("💡 Cloud servers (Vast.ai) do not have physical sound cards/microphones attached.")
-    print("👉 Run 'python3 server.py' on this server to connect via web browser microphone!")
-    sys.exit(1)
-
 # 1. Load STT
 print("Loading Ears (Faster Whisper)...")
 try:
