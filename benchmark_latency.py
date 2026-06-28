@@ -6,18 +6,26 @@ import json
 import os
 from faster_whisper import WhisperModel
 from piper.voice import PiperVoice
-
-# CONFIGURATION
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "my_gemma"
-PIPER_MODEL = "piper_models/en_US-ryan-high.onnx"
+from config import config
 
 print("="*50)
 print("LOADING MODELS FOR BENCHMARK...")
 print("="*50)
+print(f"⚙️  STT Model: {config.WHISPER_MODEL} ({config.WHISPER_DEVICE.upper()}, {config.WHISPER_COMPUTE_TYPE})")
+print(f"⚙️  Ollama URL: {config.OLLAMA_URL}")
+print(f"⚙️  Ollama Model: {config.OLLAMA_MODEL}")
+print("="*50)
 
-stt_model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
-tts_voice = PiperVoice.load(PIPER_MODEL)
+try:
+    stt_model = WhisperModel(config.WHISPER_MODEL, device=config.WHISPER_DEVICE, compute_type=config.WHISPER_COMPUTE_TYPE)
+except Exception as e:
+    print(f"⚠️ Warning: Failed to load on {config.WHISPER_DEVICE} ({e}). Falling back to CPU int8...")
+    stt_model = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
+
+if not os.path.exists(config.PIPER_MODEL):
+    print(f"❌ Error: Could not find {config.PIPER_MODEL}.")
+    sys.exit(1)
+tts_voice = PiperVoice.load(config.PIPER_MODEL)
 
 # Create a test audio file using Piper itself to test Whisper with
 print("Generating test audio...")
@@ -42,13 +50,17 @@ print(f"⏱️  STT Processing Time: {stt_time:.3f} seconds\n")
 
 # 2. LLM BENCHMARK
 payload = {
-    "model": OLLAMA_MODEL,
+    "model": config.OLLAMA_MODEL,
     "prompt": f"You are a helpful AI. Keep your answers brief. User: {user_text}\nAI:",
     "stream": True
 }
 
 start_llm = time.time()
-response = requests.post(OLLAMA_URL, json=payload, stream=True)
+try:
+    response = requests.post(config.OLLAMA_URL, json=payload, stream=True)
+except Exception as e:
+    print(f"❌ Cannot reach Ollama at {config.OLLAMA_URL}: {e}")
+    sys.exit(1)
 
 first_word_time = 0
 first_sentence_time = 0
@@ -78,6 +90,7 @@ print(f"⏱️  LLM Time to Full Sentence: {first_sentence_time:.3f} seconds\n")
 
 # 3. TTS BENCHMARK
 start_tts = time.time()
+first_audio_chunk_time = 0
 for chunk in tts_voice.synthesize(current_sentence.strip()):
     first_audio_chunk_time = time.time() - start_tts
     break # We only care about how fast the first audio bites arrive
@@ -91,10 +104,7 @@ print("="*50)
 total_hardware_latency = stt_time + first_sentence_time + first_audio_chunk_time
 
 print(f"1. Whisper Transcription:  {stt_time:.3f}s")
-print(f"2. Gemma Thinking Time:    {first_sentence_time:.3f}s")
+print(f"2. LLM Thinking Time:      {first_sentence_time:.3f}s")
 print(f"3. Piper Audio Start Time: {first_audio_chunk_time:.3f}s")
 print("-" * 50)
 print(f"🔥 Hardware Response Time: {total_hardware_latency:.3f}s")
-print("\nNOTE: In the live caller, the VAD (Silence Detector) waits exactly 1.500s")
-print("after you stop speaking before it triggers. To make it feel faster, we can")
-print("reduce the VAD wait time to 0.7s or 0.8s, and trigger TTS on commas (,) as well!")

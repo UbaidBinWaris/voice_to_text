@@ -6,18 +6,26 @@ import json
 import os
 from faster_whisper import WhisperModel
 from piper.voice import PiperVoice
-
-# CONFIGURATION
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen2:0.5b"
-PIPER_MODEL = "piper_models/en_US-ryan-high.onnx"
+from config import config
 
 print("="*50)
 print("LOADING MODELS FOR PRODUCTION STRESS TEST...")
 print("="*50)
+print(f"⚙️  STT Model: {config.WHISPER_MODEL} ({config.WHISPER_DEVICE.upper()}, {config.WHISPER_COMPUTE_TYPE})")
+print(f"⚙️  Ollama URL: {config.OLLAMA_URL}")
+print(f"⚙️  Ollama Model: {config.OLLAMA_MODEL}")
+print("="*50)
 
-stt_model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
-tts_voice = PiperVoice.load(PIPER_MODEL)
+try:
+    stt_model = WhisperModel(config.WHISPER_MODEL, device=config.WHISPER_DEVICE, compute_type=config.WHISPER_COMPUTE_TYPE)
+except Exception as e:
+    print(f"⚠️ Warning: Failed to load on {config.WHISPER_DEVICE} ({e}). Falling back to CPU int8...")
+    stt_model = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
+
+if not os.path.exists(config.PIPER_MODEL):
+    print(f"❌ Error: Could not find {config.PIPER_MODEL}.")
+    sys.exit(1)
+tts_voice = PiperVoice.load(config.PIPER_MODEL)
 
 # We simulate a 1-minute conversation broken into 4 turns of varying lengths.
 test_prompts = [
@@ -55,16 +63,16 @@ for i, audio_np in enumerate(simulated_audio):
     
     # 2. LLM
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": config.OLLAMA_MODEL,
         "prompt": f"You are a helpful AI receptionist. Keep answers brief. User: {user_text}\nAI:",
         "stream": True
     }
     start_llm = time.time()
     try:
-        response = requests.post(OLLAMA_URL, json=payload, stream=True)
+        response = requests.post(config.OLLAMA_URL, json=payload, stream=True)
     except:
-        print("❌ Ollama is not running! Please start Ollama.")
-        exit(1)
+        print(f"❌ Ollama is not running at {config.OLLAMA_URL}!")
+        sys.exit(1)
         
     first_sentence_time = 0
     current_sentence = ""
@@ -98,8 +106,6 @@ for i, audio_np in enumerate(simulated_audio):
 print("\n" + "="*50)
 print("📈 STRESS TEST RESULTS (HARDWARE LATENCY)")
 print("="*50)
-print(f"Best Latency (Shortest):  {min(results):.3f} seconds")
-print(f"Worst Latency (Longest):  {max(results):.3f} seconds")
-print(f"Average Latency:          {sum(results)/len(results):.3f} seconds")
-print("="*50)
-print("NOTE: Real-world latency = Hardware Latency + 0.6s (VAD Wait Time).")
+if results:
+    avg_latency = sum(results) / len(results)
+    print(f"Average Turn Latency: {avg_latency:.3f} seconds")
