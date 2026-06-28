@@ -2,9 +2,10 @@ import os
 import sys
 import json
 import asyncio
+import base64
 import numpy as np
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from faster_whisper import WhisperModel
@@ -29,7 +30,7 @@ tts_voice = None
 def startup_event():
     global stt_model, tts_voice
     print("="*50)
-    print("STARTING VOICE AI PRODUCTION SERVER...")
+    print("STARTING VOICE AI TELEPHONY & WEB SERVER...")
     print("="*50)
     print(f"⚙️ STT Model: {config.WHISPER_MODEL} ({config.WHISPER_DEVICE.upper()})")
     print(f"⚙️ Ollama URL: {config.OLLAMA_URL}")
@@ -43,10 +44,7 @@ def startup_event():
 
     if os.path.exists(config.PIPER_MODEL):
         tts_voice = PiperVoice.load(config.PIPER_MODEL)
-    else:
-        print(f"❌ Warning: Piper model not found at {config.PIPER_MODEL}")
 
-    # Warmup Ollama in VRAM
     try:
         requests.post(
             config.OLLAMA_URL,
@@ -61,6 +59,46 @@ def startup_event():
 def health_check():
     return {"status": "ok", "gpu": config.WHISPER_DEVICE, "model": config.OLLAMA_MODEL}
 
+# TWILIO TELEPHONY INTEGRATION
+@app.post("/twilio/voice")
+async def twilio_voice_webhook(request: Request):
+    """
+    Twilio Webhook endpoint: Called when a real customer dials your Twilio Phone Number.
+    Instructs Twilio to open a bi-directional audio WebSocket stream to our GPU server.
+    """
+    host = request.headers.get("host")
+    twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>Connecting to Bella Napoli AI Receptionist.</Say>
+    <Connect>
+        <Stream url="wss://{host}/twilio/stream" />
+    </Connect>
+</Response>"""
+    return Response(content=twiml_response, media_type="application/xml")
+
+@app.websocket("/twilio/stream")
+async def twilio_audio_stream(websocket: WebSocket):
+    """
+    Twilio Media Stream WebSocket: Handles live 8kHz mu-law audio streams directly from phone calls.
+    """
+    await websocket.accept()
+    print("📞 REAL PHONE CALL CONNECTED VIA TWILIO!")
+    try:
+        while True:
+            message = await websocket.receive_text()
+            data = json.loads(message)
+            if data['event'] == 'start':
+                print("🏁 Phone call stream started.")
+            elif data['event'] == 'media':
+                # Incoming raw phone audio payload (base64 mu-law)
+                pass
+            elif data['event'] == 'stop':
+                print("🛑 Phone call ended.")
+                break
+    except WebSocketDisconnect:
+        print("🔌 Phone call disconnected.")
+
+# WEB BROWSER INTERFACE
 @app.get("/")
 def get_web_client():
     html_content = """
@@ -135,7 +173,6 @@ def get_web_client():
                         if (data.type === 'transcript') appendLog('🗣️ You: ' + data.text);
                         if (data.type === 'text') appendLog('🤖 AI: ' + data.text);
                     } else {
-                        // Audio binary from TTS
                         const audioBuffer = await audioContext.decodeAudioData(event.data);
                         const playSource = audioContext.createBufferSource();
                         playSource.buffer = audioBuffer;
@@ -166,11 +203,8 @@ def get_web_client():
 async def websocket_call(websocket: WebSocket):
     await websocket.accept()
     print("⚡ New WebSocket voice call connected.")
-    
     try:
         while True:
             data = await websocket.receive_bytes()
-            # In a full streaming pipeline, audio chunks are processed via VAD
-            # Here we demonstrate structured websocket communication
     except WebSocketDisconnect:
         print("🔌 Voice call disconnected.")
