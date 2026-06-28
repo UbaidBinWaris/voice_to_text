@@ -205,7 +205,6 @@ def get_web_client():
             startBtn.onclick = async () => {
                 try {
                     await connectWebSocket();
-                    // Firefox hardware native AudioContext initialization
                     window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
                     if (window.audioContext.state === 'suspended') await window.audioContext.resume();
                     
@@ -223,7 +222,7 @@ def get_web_client():
                             int16Data[i] = Math.max(-1, Math.min(1, resampledData[i])) * 0x7FFF;
                         }
                         if (window.ws && window.ws.readyState === WebSocket.OPEN) {
-                            window.ws.send(int16Data.buffer);
+                            window.ws.send(int16Data.buffer.slice(int16Data.byteOffset, int16Data.byteOffset + int16Data.byteLength));
                         }
                     };
 
@@ -286,6 +285,12 @@ async def websocket_call(websocket: WebSocket):
     try:
         while True:
             message = await websocket.receive()
+            msg_type = message.get("type")
+            
+            if msg_type == "websocket.disconnect":
+                print("\n🔌 WebSocket disconnect message received.")
+                break
+                
             if "bytes" in message and message["bytes"]:
                 data = message["bytes"]
                 audio_buffer.extend(data)
@@ -339,6 +344,8 @@ async def websocket_call(websocket: WebSocket):
 
     except WebSocketDisconnect:
         print("\n🔌 Real-time voice session disconnected.\n")
+    except Exception as e:
+        print(f"\n⚠️ WebSocket handling error: {e}\n")
 
 async def process_ai_voice(user_text, chat_history, websocket):
     print("🧠 Querying Ollama LLM (qwen2.5:7b-instruct)...")
