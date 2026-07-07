@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+faster-whisper
+piper-tts
+python-dotenv
+numpy
+requests
+webrtcvad
+sounddevice
+soundfile
+librosa
+torch
+psutil
